@@ -139,9 +139,6 @@ class GtsamRtk(rtkpos):
                 if reset and self.nav.x[j] != 0.0:
                     self.initx(0.0, 0.0, j)
                     self.nav.outc[i, f] = 0
-                    # Also remove from GTSAM amb_keys
-                    if (sat_, f) in self.amb_keys:
-                        del self.amb_keys[(sat_, f)]
 
             # Initialize new ambiguities
             for i in range(ns):
@@ -198,13 +195,12 @@ class GtsamRtk(rtkpos):
                         for s in sat_common if s in obsb.sat])
         rsb, _, _, _, _ = satposs(obsb, self.nav)
 
-        # udstate: cycle slip detection + ambiguity init + P propagation
-        # Position prediction comes from GTSAM, but udstate still needed
-        # for nav.P propagation (used by resamb_lambda)
-        self.udstate(obs_)
+        # Ambiguity management only (no EKF position/P propagation)
+        # Like test_imu_gnss_2phase.py: no udstate() call
+        self._ud_ambiguity(obs_)
         sat = obs.sat[iu]
 
-        # Position from GTSAM (not EKF prediction)
+        # Position from GTSAM previous estimate
         if self.current_estimate is not None and self.epoch > 0:
             prev_key = self.X(self.epoch - 1)
             if self.current_estimate.exists(prev_key):
@@ -346,13 +342,16 @@ class GtsamRtk(rtkpos):
             return
 
         # ---- Write back to nav ----
+        self.nav.P[:, :] = 0
+        self.nav.vsat[:, :] = 0
+
         self.nav.x[0:3] = np.array(estimate.atPoint3(key_x))
         for (sat_n, f), key_n in self.amb_keys.items():
             if estimate.exists(key_n):
                 self.nav.x[self.IB(sat_n, f, self.nav.na)] = estimate.atDouble(key_n)
                 self.nav.vsat[sat_n - 1, f] = 1
 
-        # ---- Covariance for LAMBDA ----
+        # ---- Covariance from GTSAM Marginals ----
         try:
             if self.smoother is not None:
                 marginals = gtsam.Marginals(self.smoother.getFactors(), estimate)
