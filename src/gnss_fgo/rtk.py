@@ -326,7 +326,11 @@ class GtsamRtk(rtkpos):
         if self.nav.armode > 0:
             try:
                 nb, xa = self.resamb_lambda(sat, self.nav.parmode, self.nav.par_P0)
-            except Exception:
+            except Exception as ex:
+                if self.epoch < 5:
+                    import traceback
+                    print(f"  AR error ep{self.epoch}: {ex}")
+                    traceback.print_exc()
                 nb = 0
                 xa = None
             if nb > 0:
@@ -349,7 +353,7 @@ class GtsamRtk(rtkpos):
             if self.nav.fix[sat_n - 1, f] == 3:
                 idx = self.IB(sat_n, f, self.nav.na)
                 graph.addPriorDouble(key_n, xa[idx],
-                    gtsam.noiseModel.Isotropic.Sigma(1, np.sqrt(self.nav.var_holdamb)))
+                    gtsam.noiseModel.Isotropic.Sigma(1, np.sqrt(getattr(self.nav, 'var_holdamb', 0.1))))
         if graph.size() > 0:
             try:
                 if self.smoother is not None:
