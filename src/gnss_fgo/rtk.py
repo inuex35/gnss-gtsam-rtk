@@ -322,15 +322,12 @@ class GtsamRtk(rtkpos):
 
         self.nav.smode = 5  # float
 
-        # ---- LAMBDA AR ----
+        # ---- LAMBDA AR (cssrlib resamb_lambda, same as test_cssrlib_gtsam_nl.py) ----
         if self.nav.armode > 0:
             try:
-                nb, xa = self.resamb_lambda(sat, self.nav.parmode, self.nav.par_P0)
-            except Exception as ex:
-                if self.epoch < 5:
-                    import traceback
-                    print(f"  AR error ep{self.epoch}: {ex}")
-                    traceback.print_exc()
+                nb, xa = self.resamb_lambda(
+                    sat, self.nav.parmode, self.nav.par_P0)
+            except (SystemExit, Exception):
                 nb = 0
                 xa = None
             if nb > 0:
@@ -339,44 +336,31 @@ class GtsamRtk(rtkpos):
                 if self.valpos(v_fix, R_fix):
                     if self.nav.armode == 3:
                         self.holdamb(xa)
+                        self._inject_hold_isam(xa)
                     self.nav.smode = 4
 
         self.nav.t = obs.t
         self.epoch += 1
         self.epoch_time += 1.0
 
-    def _inject_hold(self, xa):
-        """Inject held ambiguities as tight priors into ISAM2/IFLS."""
+    def _inject_hold_isam(self, xa):
+        """Inject integer ambiguity hold as tight priors into ISAM2/IFLS.
+
+        Same as test_cssrlib_gtsam_nl.py _inject_hold_isam.
+        """
         graph = gtsam.NonlinearFactorGraph()
         for (sat_n, f), key_n in self.amb_keys.items():
-            if self.nav.fix[sat_n - 1, f] == 3:
+            if self.nav.fix[sat_n - 1, f] == 3:  # held
                 idx = self.IB(sat_n, f, self.nav.na)
-                graph.addPriorDouble(key_n, xa[idx],
-                    gtsam.noiseModel.Isotropic.Sigma(
-                        1, np.sqrt(getattr(self.nav, 'var_holdamb', 0.1))))
+                hold_val = xa[idx]
+                graph.addPriorDouble(key_n, hold_val,
+                    gtsam.noiseModel.Isotropic.Sigma(1, np.sqrt(self.VAR_HOLDAMB)))
         if graph.size() > 0:
             try:
                 if self.smoother is not None:
                     self.smoother.update(graph, gtsam.Values(),
                                          gtsam.FixedLagSmootherKeyTimestampMap())
-                    estimate = self.smoother.calculateEstimate()
                 elif self.isam is not None:
                     self.isam.update(graph, gtsam.Values())
-                    self.isam.update()
-                    estimate = self.isam.calculateEstimate()
-                else:
-                    return
-                # Write back updated state
-                key_x = self.X(self.epoch)
-                if estimate.exists(key_x):
-                    pos = np.array(estimate.atPoint3(key_x))
-                    if np.all(np.isfinite(pos)):
-                        self.nav.x[0:3] = pos
-                        for (s, f2), k in self.amb_keys.items():
-                            if estimate.exists(k):
-                                val = estimate.atDouble(k)
-                                if np.isfinite(val):
-                                    self.nav.x[self.IB(s, f2, self.nav.na)] = val
-                self.current_estimate = estimate
             except RuntimeError:
                 pass
