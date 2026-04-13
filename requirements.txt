@@ -1,0 +1,2 @@
+cssrlib>=1.2
+numpy
