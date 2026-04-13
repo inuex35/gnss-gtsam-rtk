@@ -10,7 +10,7 @@ import numpy as np
 import gtsam
 
 from cssrlib.rtk import rtkpos
-from cssrlib.gnss import uGNSS, uTYP, sat2prn, geodist, timediff
+from cssrlib.gnss import uGNSS, uTYP, rCST, sat2prn, geodist, timediff
 from cssrlib.ephemeris import satposs
 
 
@@ -114,6 +114,64 @@ class GtsamRtk(rtkpos):
 
         return pairs
 
+    def _ud_ambiguity(self, obs):
+        """Ambiguity management: cycle slip detection, outage reset, initialization.
+
+        Extracted from cssrlib udstate() — only the ambiguity parts.
+        Position/P propagation is handled by GTSAM factors instead.
+        """
+        tt = timediff(obs.t, self.nav.t) if self.nav.t.time > 0 else 1.0
+        ns = len(obs.sat)
+        sat = obs.sat
+
+        # Process noise for ambiguities only
+        for f in range(self.nav.nf):
+            # Outage counter + reset
+            for i in range(uGNSS.MAXSAT):
+                sat_ = i + 1
+                sys_i, _ = sat2prn(sat_)
+                self.nav.outc[i, f] += 1
+                reset = (self.nav.outc[i, f] > self.nav.maxout or
+                         np.any(self.nav.edt[i, :] > 0))
+                if sys_i not in obs.sig.keys():
+                    continue
+                j = self.IB(sat_, f, self.nav.na)
+                if reset and self.nav.x[j] != 0.0:
+                    self.initx(0.0, 0.0, j)
+                    self.nav.outc[i, f] = 0
+                    # Also remove from GTSAM amb_keys
+                    if (sat_, f) in self.amb_keys:
+                        del self.amb_keys[(sat_, f)]
+
+            # Initialize new ambiguities
+            for i in range(ns):
+                if np.any(self.nav.edt[sat[i] - 1, :] > 0):
+                    continue
+                sys_i, _ = sat2prn(sat[i])
+                if sys_i not in obs.sig.keys():
+                    continue
+                sig = obs.sig[sys_i][uTYP.L][f]
+                if sys_i == uGNSS.GLO:
+                    fi = sig.frequency(self.nav.glo_ch.get(sat[i], 0))
+                else:
+                    fi = sig.frequency()
+                lam = rCST.CLIGHT / fi if fi > 0 else 0
+                cp = obs.L[i, f]
+                pr = obs.P[i, f]
+                if cp == 0 or pr == 0 or lam == 0:
+                    continue
+                bias = cp - pr / lam
+                j = self.IB(sat[i], f, self.nav.na)
+                if self.nav.x[j] == 0.0:
+                    self.initx(bias, self.nav.sig_n0**2, j)
+
+        # Add process noise to ambiguity diagonal
+        for f in range(self.nav.nf):
+            for i in range(uGNSS.MAXSAT):
+                j = self.IB(i + 1, f, self.nav.na)
+                if self.nav.x[j] != 0.0:
+                    self.nav.P[j, j] += self.nav.q[self.nav.nq - 1] * abs(tt)
+
     # -- Main processing --
     def process(self, obs, cs=None, orb=None, bsx=None, obsb=None):
         if len(obs.sat) == 0:
@@ -140,11 +198,21 @@ class GtsamRtk(rtkpos):
                         for s in sat_common if s in obsb.sat])
         rsb, _, _, _, _ = satposs(obsb, self.nav)
 
-        # Time propagation
+        # udstate: cycle slip detection + ambiguity init + P propagation
+        # Position prediction comes from GTSAM, but udstate still needed
+        # for nav.P propagation (used by resamb_lambda)
         self.udstate(obs_)
-        xp = self.nav.x.copy()
-        pos_pred = xp[0:3].copy()
         sat = obs.sat[iu]
+
+        # Position from GTSAM (not EKF prediction)
+        if self.current_estimate is not None and self.epoch > 0:
+            prev_key = self.X(self.epoch - 1)
+            if self.current_estimate.exists(prev_key):
+                pos_pred = np.array(self.current_estimate.atPoint3(prev_key))
+            else:
+                pos_pred = self.nav.x[0:3].copy()
+        else:
+            pos_pred = self.nav.x[0:3].copy()
 
         yu, eu, elu = self.zdres(obs, None, None, rs, vs, dts, pos_pred)
         el = elu[iu]
